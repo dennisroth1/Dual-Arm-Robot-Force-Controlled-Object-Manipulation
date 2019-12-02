@@ -1,5 +1,5 @@
 //
-// Created by daniel on 27.12.16.
+// 
 //
 
 #ifndef PROJECT_TRANSFORM_H
@@ -35,7 +35,7 @@
 #include <kdl/frames_io.hpp>
 
 
-namespace dual_arm_toolbox{
+namespace lcr_toolbox{
     class Transform {
     protected:
     public:

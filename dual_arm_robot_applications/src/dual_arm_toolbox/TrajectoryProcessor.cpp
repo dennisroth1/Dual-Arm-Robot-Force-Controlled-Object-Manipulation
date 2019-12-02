@@ -1,131 +1,114 @@
 //
-// Created by Daniel Höltgen on 17.10.16.
+// 
 //
 
-#include "dual_arm_toolbox/TrajectoryProcessor.h"
+#include "lcr_toolbox/TrajectoryProcessor.h"
 
-using namespace dual_arm_toolbox;
+using namespace lcr_toolbox;
 
-bool TrajectoryProcessor::fuse(moveit_msgs::RobotTrajectory &arms_trajectory,
-                               moveit_msgs::RobotTrajectory arm1_trajectory,
-                               moveit_msgs::RobotTrajectory arm2_trajectory) {
-    arms_trajectory = arm1_trajectory;
-    if (arm1_trajectory.joint_trajectory.points.size() != arm2_trajectory.joint_trajectory.points.size()){
-        int i1 = arm1_trajectory.joint_trajectory.points.size();
-        int i2 = arm2_trajectory.joint_trajectory.points.size();
-        ROS_WARN("fuse trajectory: unequal size of trajectory points. arm1: %i, arm2: %i", i1, i2);
-        return false;
-    }
-    for (unsigned int i=0; i < arm2_trajectory.joint_trajectory.joint_names.size(); i++)
-        arms_trajectory.joint_trajectory.joint_names.push_back(arm2_trajectory.joint_trajectory.joint_names[i]);
-    for (unsigned int i=0; i < arms_trajectory.joint_trajectory.points.size(); i++){
-        for (unsigned int j=0; j < arm2_trajectory.joint_trajectory.joint_names.size(); j++){
-            arms_trajectory.joint_trajectory.points[i].positions.push_back(arm2_trajectory.joint_trajectory.points[i].positions[j]);
-            arms_trajectory.joint_trajectory.points[i].accelerations.push_back(arm2_trajectory.joint_trajectory.points[i].accelerations[j]);
-            arms_trajectory.joint_trajectory.points[i].velocities.push_back(arm2_trajectory.joint_trajectory.points[i].velocities[j]);
+
+
+void setAvgCartesianSpeed(moveit::planning_interface::MoveGroupInterface::Plan &plan, const std::string end_effector, const double desired_speed)
+{
+    robot_model_loader::RobotModelLoader robot_model_loader("/robot_description");
+    robot_model::RobotModelPtr kinematic_model = robot_model_loader.getModel();
+    robot_state::RobotStatePtr kinematic_state(new robot_state::RobotState(kinematic_model));
+    kinematic_state->setToDefaultValues();
+ 
+    int number_waypoints = plan.trajectory_.joint_trajectory.points.size();                                //number of waypoints in current trajectory
+    const std::vector<std::string> joint_names = plan.trajectory_.joint_trajectory.joint_names;    // names of the joints in trajectory
+ 
+    //set joint position of first waypoint
+    kinematic_state->setVariablePositions(joint_names, plan.trajectory_.joint_trajectory.points.at(0).positions);
+ 
+    Eigen::Affine3d current_end_effector_state = kinematic_state->getGlobalLinkTransform(end_effector);
+    Eigen::Affine3d next_end_effector_state;
+    double euclidean_distance, new_timestamp, old_timestamp, q1, q2, q3, dt1, dt2, v1, v2, a;
+    trajectory_msgs::JointTrajectoryPoint *previous_waypoint, *current_waypoint, *next_waypoint;
+ 
+    for(int i = 0; i < number_waypoints - 1; i++)
+    {
+        current_waypoint = &plan.trajectory_.joint_trajectory.points.at(i);
+        next_waypoint = &plan.trajectory_.joint_trajectory.points.at(i+1);
+         
+        //set joints for next waypoint
+        kinematic_state->setVariablePositions(joint_names, next_waypoint->positions);
+ 
+        //do forward kinematics to get cartesian positions of end effector for next waypoint
+        next_end_effector_state = kinematic_state->getGlobalLinkTransform(end_effector);
+ 
+        //get euclidean distance between the two waypoints
+        euclidean_distance = pow(pow(next_end_effector_state.translation()[0] - current_end_effector_state.translation()[0], 2) + 
+                            pow(next_end_effector_state.translation()[1] - current_end_effector_state.translation()[1], 2) + 
+                            pow(next_end_effector_state.translation()[2] - current_end_effector_state.translation()[2], 2), 0.5);
+ 
+        new_timestamp = current_waypoint->time_from_start.toSec() + (euclidean_distance / desired_speed);      //start by printing out all 3 of these!
+        old_timestamp = next_waypoint->time_from_start.toSec();
+ 
+        //update next waypoint timestamp & joint velocities/accelerations if joint velocity/acceleration constraints allow
+        if(new_timestamp > old_timestamp)
+            next_waypoint->time_from_start.fromSec(new_timestamp);
+        else
+        {
+            //ROS_WARN_NAMED("setAvgCartesianSpeed", "Average speed is too fast. Moving as fast as joint constraints allow.");
         }
+         
+        //update current_end_effector_state for next iteration
+        current_end_effector_state = next_end_effector_state;
     }
-    return true;
-}
-
-bool TrajectoryProcessor::split(moveit_msgs::RobotTrajectory arms_trajectory,
-                                moveit_msgs::RobotTrajectory &arm1_trajectory,
-                                moveit_msgs::RobotTrajectory &arm2_trajectory,
-                                std::string arm1_prefix,
-                                std::string arm2_prefix) {
-    // header
-    arm1_trajectory.joint_trajectory.header = arms_trajectory.joint_trajectory.header;
-    arm2_trajectory.joint_trajectory.header = arms_trajectory.joint_trajectory.header;
-
-    // joint names
-    for (unsigned int i = 0; i < arms_trajectory.joint_trajectory.joint_names.size(); i++){
-        if (arms_trajectory.joint_trajectory.joint_names[i].compare(0,arm1_prefix.size(),arm1_prefix)==0){
-            arm1_trajectory.joint_trajectory.joint_names.push_back(arms_trajectory.joint_trajectory.joint_names[i]);
+     
+    //update joint velocities and accelerations (Reference: updateTrajectory from iterative_time_parameterization)
+    for(int i = 0; i < number_waypoints; i++)
+    {
+        current_waypoint = &plan.trajectory_.joint_trajectory.points.at(i);            //set current, previous & next waypoints
+        if(i > 0)
+            previous_waypoint = &plan.trajectory_.joint_trajectory.points.at(i-1);
+        if(i < number_waypoints-1)
+            next_waypoint = &plan.trajectory_.joint_trajectory.points.at(i+1);
+ 
+        if(i == 0)          //update dt's based on waypoint (do this outside of loop to save time)
+            dt1 = dt2 = next_waypoint->time_from_start.toSec() - current_waypoint->time_from_start.toSec();
+        else if(i < number_waypoints-1)
+        {
+            dt1 = current_waypoint->time_from_start.toSec() - previous_waypoint->time_from_start.toSec();
+            dt2 = next_waypoint->time_from_start.toSec() - current_waypoint->time_from_start.toSec();
         }
-        if (arms_trajectory.joint_trajectory.joint_names[i].compare(0,arm2_prefix.size(),arm2_prefix)==0){
-            arm2_trajectory.joint_trajectory.joint_names.push_back(arms_trajectory.joint_trajectory.joint_names[i]);
-        }
-    }
-
-    // points
-    arm1_trajectory.joint_trajectory.points.resize(arms_trajectory.joint_trajectory.points.size());
-    arm2_trajectory.joint_trajectory.points.resize(arms_trajectory.joint_trajectory.points.size());
-    for (unsigned int i = 0; i < arms_trajectory.joint_trajectory.points.size(); i++){
-        for (unsigned int j = 0; j < arms_trajectory.joint_trajectory.joint_names.size(); j++){
-            if (arms_trajectory.joint_trajectory.joint_names[j].compare(0,arm1_prefix.size(),arm1_prefix)==0){
-                /*arm1_trajectory.joint_trajectory.points[i].accelerations.push_back(
-                        arms_trajectory.joint_trajectory.points[i].accelerations[j]);
-                arm1_trajectory.joint_trajectory.points[i].effort.push_back(
-                        arms_trajectory.joint_trajectory.points[i].effort[j]);*/
-                arm1_trajectory.joint_trajectory.points[i].positions.push_back(
-                        arms_trajectory.joint_trajectory.points[i].positions[j]);
-                arm1_trajectory.joint_trajectory.points[i].velocities.push_back(
-                        arms_trajectory.joint_trajectory.points[i].velocities[j]);
+        else
+            dt1 = dt2 = current_waypoint->time_from_start.toSec() - previous_waypoint->time_from_start.toSec();
+ 
+        for(int j = 0; j < joint_names.size(); j++)     //loop through all joints in waypoint
+        {
+            if(i == 0)                      //first point
+            {
+                q1 = next_waypoint->positions.at(j);
+                q2 = current_waypoint->positions.at(j);
+                q3 = q1;
             }
-            else if (arms_trajectory.joint_trajectory.joint_names[j].compare(0,arm2_prefix.size(),arm2_prefix)==0){
-                /*arm2_trajectory.joint_trajectory.points[i].accelerations.push_back(
-                        arms_trajectory.joint_trajectory.points[i].accelerations[j]);
-                arm2_trajectory.joint_trajectory.points[i].effort.push_back(
-                        arms_trajectory.joint_trajectory.points[i].effort[j]);*/
-                arm2_trajectory.joint_trajectory.points[i].positions.push_back(
-                        arms_trajectory.joint_trajectory.points[i].positions[j]);
-                arm2_trajectory.joint_trajectory.points[i].velocities.push_back(
-                        arms_trajectory.joint_trajectory.points[i].velocities[j]);
+            else if(i < number_waypoints-1)    //middle points
+            {
+                q1 = previous_waypoint->positions.at(j);
+                q2 = current_waypoint->positions.at(j);
+                q3 = next_waypoint->positions.at(j);
             }
-        }
-        arm1_trajectory.joint_trajectory.points[i].time_from_start =
-                arms_trajectory.joint_trajectory.points[i].time_from_start;
-        arm2_trajectory.joint_trajectory.points[i].time_from_start =
-                arms_trajectory.joint_trajectory.points[i].time_from_start;
-    }
-    return true;
-}
-
-void TrajectoryProcessor::clean(moveit_msgs::RobotTrajectory &trajectory) {
-    for (unsigned int i = 1; i < trajectory.joint_trajectory.points.size(); i++){
-        if (trajectory.joint_trajectory.points[i-1].time_from_start >= trajectory.joint_trajectory.points[i].time_from_start){
-            ROS_WARN("Detected that trajectory is not increasing in time. Erased false entry.");
-            trajectory.joint_trajectory.points.erase(trajectory.joint_trajectory.points.begin()+i-1);
-        }
-    }
-}
-
-void TrajectoryProcessor::computeTimeFromStart(moveit_msgs::RobotTrajectory& trajectory, double step_t){
-    for (unsigned int i=0; i < trajectory.joint_trajectory.points.size(); i++){
-        trajectory.joint_trajectory.points[i].time_from_start.fromSec(i*step_t);
-    }
-}
-
-void TrajectoryProcessor::scaleTrajectorySpeed(moveit_msgs::RobotTrajectory& trajectory, double scale){
-    for (unsigned int i = 0; i < trajectory.joint_trajectory.points.size(); i++){
-        trajectory.joint_trajectory.points[i].time_from_start.fromSec(trajectory.joint_trajectory.points[i].time_from_start.toSec()/scale);
-        for (unsigned int j = 0; j < trajectory.joint_trajectory.joint_names.size(); j++){
-            trajectory.joint_trajectory.points[i].velocities[j] = trajectory.joint_trajectory.points[i].velocities[j] * scale;
-            trajectory.joint_trajectory.points[i].accelerations[j] = trajectory.joint_trajectory.points[i].accelerations[j] * scale;
+            else                            //last point
+            {
+                q1 = previous_waypoint->positions.at(j);
+                q2 = current_waypoint->positions.at(j);
+                q3 = q1;
+            }
+ 
+            if(dt1 == 0.0 || dt2 == 0.0)
+                v1 = v2 = a = 0.0;
+            else
+            {
+                v1 = (q2 - q1)/dt1;
+                v2 = (q3 - q2)/dt2;
+                a = 2.0*(v2 - v1)/(dt1+dt2);
+            }
+ 
+            //actually set the velocity and acceleration
+            current_waypoint->velocities.at(j) = (v1+v2)/2;
+            current_waypoint->accelerations.at(j) = a;
         }
     }
-}
-
-bool TrajectoryProcessor::computeVelocities(moveit_msgs::RobotTrajectory& trajectory, moveit::planning_interface::MoveGroup& moveGroup){
-    dual_arm_toolbox::TrajectoryProcessor::computeTimeFromStart(trajectory, 0.4);
-    robot_trajectory::RobotTrajectory rt(moveGroup.getCurrentState()->getRobotModel(), "arms");
-    rt.setRobotTrajectoryMsg(*moveGroup.getCurrentState(), trajectory);// get a RobotTrajectory from trajectory
-    trajectory_processing::IterativeParabolicTimeParameterization iptp;
-    if (!iptp.computeTimeStamps(rt)){
-        ROS_WARN("computed time stamp FAILED.");
-        return false;
-    }
-    rt.getRobotTrajectoryMsg(trajectory);// Get RobotTrajectory_msg from RobotTrajectory
-    return true;
-}
-
-void TrajectoryProcessor::visualizePlan(moveit::planning_interface::MoveGroup::Plan& plan, unsigned int sec){
-    ros::NodeHandle nh;
-    ros::Publisher display_publisher = nh.advertise<moveit_msgs::DisplayTrajectory>("/move_group/display_planned_path", 1, true);
-    moveit_msgs::DisplayTrajectory display_trajectory;
-    display_trajectory.trajectory_start = plan.start_state_;
-    display_trajectory.trajectory.push_back(plan.trajectory_);
-    ROS_INFO("Visualizing plan and waiting for %i seconds", sec);
-    display_publisher.publish(display_trajectory);
-    sleep(sec);
 }

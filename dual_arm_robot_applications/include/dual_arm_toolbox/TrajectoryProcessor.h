@@ -1,5 +1,5 @@
 //
-// Created by daniel on 27.12.16.
+// 
 //
 
 #ifndef PROJECT_TRAJECTORYPROCESSOR_H
@@ -35,33 +35,13 @@
 #include <kdl/frames_io.hpp>
 
 
-namespace dual_arm_toolbox {
+namespace lcr_toolbox {
     class TrajectoryProcessor {
     protected:
     public:
-        // fuses two trajectories into one; both should be of same length
-        static bool fuse(moveit_msgs::RobotTrajectory &arms_trajectory,
-                         moveit_msgs::RobotTrajectory arm1_trajectory,
-                         moveit_msgs::RobotTrajectory arm2_trajectory);
 
-        // splits one trajectory for both arms into two trajectory for each arm
-        static bool split(moveit_msgs::RobotTrajectory arms_trajectory,
-                          moveit_msgs::RobotTrajectory &arm1_trajectory,
-                          moveit_msgs::RobotTrajectory &arm2_trajectory,
-                          std::string arm1_prefix,
-                          std::string arm2_prefix);
+        void setAvgCartesianSpeed(moveit::planning_interface::MoveGroupInterface::Plan &plan, const std::string end_effector, const double speed); 
 
-        // moveit sometimes generates trajectories with two time the same time stamp. This method eliminates one entry.
-        static void clean(moveit_msgs::RobotTrajectory &trajectory);
-
-        static void computeTimeFromStart(moveit_msgs::RobotTrajectory &trajectory, double step_t);
-
-        static void scaleTrajectorySpeed(moveit_msgs::RobotTrajectory &trajectory, double scale);
-
-        static bool
-        computeVelocities(moveit_msgs::RobotTrajectory &trajectory, moveit::planning_interface::MoveGroup &moveGroup);
-
-        static void visualizePlan(moveit::planning_interface::MoveGroup::Plan &plan, unsigned int sec);
     };
 }//namespace
 #endif //PROJECT_TRAJECTORYPROCESSOR_H
